@@ -12,6 +12,8 @@ Status: early development.
   2026.10.21 and the assembly sandbox; task panel with live preview of position / velocity /
   acceleration (command "Bewegungsprofil" next to "Simulation" in the Assembly workbench).
 - Next: Addon Manager metadata (package.xml), translations, result plots after a simulation.
+- To discuss: a separate simulation addon with real actuators (force / torque, masses, friction) -
+  dynamics instead of the kinematic, prescribed-motion simulation of Assembly.
 
 ## Usage
 
@@ -19,7 +21,10 @@ Status: early development.
 2. Assembly toolbar/menu: **Bewegungsprofil**.
 3. Choose the driven quantity (Weg/Geschwindigkeit/Beschleunigung) and a profile, enter the
    values (degrees or mm, seconds) or a table; the preview shows all three curves.
-4. OK creates or updates the Motion of the assembly's simulation. Run the simulation as usual.
+4. OK creates or updates the Motion of the assembly's simulation. A joint that already has a Motion
+   (also one made in the simulation dialog) gets that Motion edited - never a second one.
+   "Übernehmen, simulieren und abspielen" saves, runs the simulation and plays it once in the 3D
+   view; closing the panel puts the parts back where they were.
 
 ## How it works
 

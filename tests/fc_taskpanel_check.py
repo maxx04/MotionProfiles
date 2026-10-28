@@ -87,6 +87,75 @@ def main():
     ok &= check("Tabelle gespeichert", motion.ProfileType == "table" and motion.Formula != before
                 and len([o for o in doc.Objects if motion_link.has_profile(o)]) == 1,
                 f"ProfileType={motion.ProfileType}")
+
+    # 5) open/close through the real task view: no "C++ object already deleted" from matplotlib
+    import FreeCADGui as Gui
+    from PySide import QtCore, QtWidgets
+
+    errors = []
+    previous_hook = sys.excepthook
+    sys.excepthook = lambda kind, value, tb: errors.append(f"{kind.__name__}: {value}")
+    try:
+        for i in range(3):
+            panel = MotionProfileTaskPanel(asm, motion=motion)
+            Gui.Control.showDialog(panel)
+            for _ in range(10):
+                QtWidgets.QApplication.processEvents()
+                QtCore.QThread.msleep(20)
+            panel.param_boxes.get("A", panel.v0_box).setValue(1.0 + i) if panel.param_boxes else None
+            panel.accept() if i == 1 else panel.reject()
+            for _ in range(10):
+                QtWidgets.QApplication.processEvents()
+                QtCore.QThread.msleep(20)
+    finally:
+        sys.excepthook = previous_hook
+    ok &= check("Aufgabenansicht öffnen/schließen", not errors, "; ".join(errors[:2]) or "keine Fehler")
+
+    # 6) joint chosen without motion: the existing motion is edited, no second one
+    panel = MotionProfileTaskPanel(asm, joint=joint)
+    ok &= check("Vorhandene Motion gewählt", panel.motion is motion and "vorhandene" in panel.target_label.text(),
+                panel.target_label.text())
+    panel.accept()
+    count = len([o for o in doc.Objects if hasattr(o, "MotionType")])
+    ok &= check("Keine zweite Motion", count == 1, f"{count} Motion(s)")
+    App.closeDocument(doc.Name)
+
+    # 7) plain motion from the simulation dialog (no profile): taken over, formula replaced
+    import CommandCreateSimulation as CCS
+
+    doc, asm, joint, mover = build_assembly("Revolute")
+    sim = motion_link.get_or_create_simulation(asm)
+    plain = asm.newObject("App::FeaturePython", "Motion")
+    CCS.Motion(plain, "Angular", joint, "10*time")
+    sim.Group = sim.Group + [plain]
+    doc.recompute()
+    panel = MotionProfileTaskPanel(asm, joint=joint)
+    ok &= check("Fremde Motion übernommen", panel.motion is plain and "ersetzt" in panel.target_label.text(),
+                panel.target_label.text())
+    panel._set_combo(panel.quantity_combo, "velocity")
+    panel._set_combo(panel.profile_combo, "constant")
+    panel.param_boxes["A"].setValue(45.0)
+    panel.t_end.setValue(1.0)
+    panel.t_step.setValue(0.05)
+
+    # 8) play button: saves, simulates, moves the part, restores on close
+    start = App.Placement(mover.Placement)
+    panel.play()
+    seen = 0.0
+    for _ in range(300):
+        QtWidgets.QApplication.processEvents()
+        QtCore.QThread.msleep(10)
+        seen = max(seen, abs(joint_value("Revolute", start, mover.Placement)))
+        if panel.timer is None or not panel.timer.isActive():
+            break
+    motions = [o for o in doc.Objects if hasattr(o, "MotionType")]
+    ok &= check("Abspielen", panel.frames > 3 and seen > 0.1 and not panel.timer.isActive(),
+                f"{panel.frames} Bilder, max. Winkel {math.degrees(seen):.1f}°, Meldung „{panel.message.text()}“")
+    ok &= check("Abspielen speichert", len(motions) == 1 and plain.ProfileType == "constant"
+                and plain.Formula != "10*time", f"{len(motions)} Motion(s), Formel {plain.Formula[:40]}")
+    panel.reject()
+    back = mover.Placement.isSame(start, 1e-9)
+    ok &= check("Lage nach Schließen zurück", back, str(mover.Placement))
     App.closeDocument(doc.Name)
 
     print("RESULT: PASS" if ok else "RESULT: FAIL")

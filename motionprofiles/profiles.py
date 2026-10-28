@@ -127,7 +127,12 @@ PROFILES = {
 
 
 def table_profile(points, degree=3):
-    """Piecewise curve through (t, value) points: degree 1 (linear) or 3 (natural cubic spline)."""
+    """Piecewise curve through (t, value) points: degree 1 (linear) or 3 (smooth cubic).
+
+    Cubic is shape-preserving (monotone Hermite, Fritsch-Carlson): between two points the curve
+    stays within their values, equal neighbours give a flat piece, a local peak is a point. A natural
+    spline would overshoot badly next to a big step (e.g. 300 -> 2000 -> 0). The slope is 0 at the
+    first and last point, so holding the end values outside the table stays smooth."""
     pts = sorted((float(t), float(v)) for t, v in points)
     if len(pts) < 2:
         raise ValueError("table: at least two points")
@@ -136,34 +141,31 @@ def table_profile(points, degree=3):
     if any(b <= a for a, b in zip(ts, ts[1:])):
         raise ValueError("table: times must be distinct")
     n = len(pts)
-    if degree == 1 or n == 2:
-        segs = [Segment(ts[i], [vs[i], (vs[i + 1] - vs[i]) / (ts[i + 1] - ts[i])]) for i in range(n - 1)]
-        return Piecewise(segs)
+    h = [ts[i + 1] - ts[i] for i in range(n - 1)]
+    secant = [(vs[i + 1] - vs[i]) / h[i] for i in range(n - 1)]
+    if degree == 1:
+        return _hold_ends([Segment(ts[i], [vs[i], secant[i]]) for i in range(n - 1)], ts, vs)
     if degree != 3:
         raise ValueError("table: degree 1 or 3")
-    h = [ts[i + 1] - ts[i] for i in range(n - 1)]
-    # natural spline: second derivatives m (m0 = m_{n-1} = 0), tridiagonal system (Thomas)
-    a = [0.0] * n
-    b = [1.0] * n
-    c = [0.0] * n
-    d = [0.0] * n
-    for i in range(1, n - 1):
-        a[i] = h[i - 1]
-        b[i] = 2.0 * (h[i - 1] + h[i])
-        c[i] = h[i]
-        d[i] = 6.0 * ((vs[i + 1] - vs[i]) / h[i] - (vs[i] - vs[i - 1]) / h[i - 1])
-    for i in range(1, n):
-        w = a[i] / b[i - 1]
-        b[i] -= w * c[i - 1]
-        d[i] -= w * d[i - 1]
-    m = [0.0] * n
-    m[-1] = d[-1] / b[-1]
-    for i in range(n - 2, -1, -1):
-        m[i] = (d[i] - c[i] * m[i + 1]) / b[i]
+    slope = [0.0] * n
+    for k in range(1, n - 1):
+        if secant[k - 1] * secant[k] > 0.0:
+            w1 = 2.0 * h[k] + h[k - 1]
+            w2 = h[k] + 2.0 * h[k - 1]
+            slope[k] = (w1 + w2) / (w1 / secant[k - 1] + w2 / secant[k])
     segs = []
     for i in range(n - 1):
-        slope = (vs[i + 1] - vs[i]) / h[i] - h[i] * (2.0 * m[i] + m[i + 1]) / 6.0
-        segs.append(Segment(ts[i], [vs[i], slope, 0.5 * m[i], (m[i + 1] - m[i]) / (6.0 * h[i])]))
+        d0, d1 = slope[i], slope[i + 1]
+        segs.append(Segment(ts[i], [vs[i], d0, (3.0 * secant[i] - 2.0 * d0 - d1) / h[i],
+                                    (d0 + d1 - 2.0 * secant[i]) / h[i] ** 2]))
+    return _hold_ends(segs, ts, vs)
+
+
+def _hold_ends(segs, ts, vs):
+    """Constant first value from t = 0 up to the first point, constant last value after the last."""
+    segs = segs + [Segment(ts[-1], [vs[-1]])]
+    if ts[0] > 0.0:
+        segs = [Segment(0.0, [vs[0]])] + segs
     return Piecewise(segs)
 
 

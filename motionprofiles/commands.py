@@ -54,13 +54,39 @@ class _AssemblyManipulator:
     """Put the command right after "Simulation" in the Assembly toolbar and menu."""
 
     def modifyToolBars(self):
-        return [{"append": COMMAND, "toolItem": "Assembly_CreateSimulation"}]
+        # "toolItem" (hinter Simulation) greift bei der Assembly-Toolbar nicht - an die Toolbar
+        # "Assembly" anhaengen, die "Simulation" enthaelt.
+        return [{"append": COMMAND, "toolBar": "Assembly"}]
 
     def modifyMenuBar(self):
         return [{"append": COMMAND, "menuItem": "Assembly_CreateSimulation"}]
+
+
+class _TaskWatcher:
+    """Eintrag in der Aufgabenansicht der Assembly-Werkbank (wie dort "Simulation"): sichtbar bei
+    aktiver Baugruppe mit antreibbarem Gelenk."""
+
+    def __init__(self):
+        self.commands = [COMMAND]
+        self.title = "Bewegungsprofil"
+
+    def shouldShow(self):
+        asm = _active_assembly()
+        if asm is None or asm.Document != App.ActiveDocument:
+            return False
+        return bool(motion_link.joint_instances(asm))
+
+
+def _on_workbench_activated(name):
+    # Die Assembly-Werkbank setzt ihre Watcher in Activated() neu; danach kommt dieses Signal.
+    if name == "AssemblyWorkbench":
+        Gui.Control.addTaskWatcher([_TaskWatcher()])
 
 
 def register():
     Gui.addCommand(COMMAND, CommandEditProfile())
     if hasattr(Gui, "addWorkbenchManipulator"):
         Gui.addWorkbenchManipulator(_AssemblyManipulator())
+    main_window = Gui.getMainWindow()
+    if main_window is not None and hasattr(main_window, "workbenchActivated"):
+        main_window.workbenchActivated.connect(_on_workbench_activated)

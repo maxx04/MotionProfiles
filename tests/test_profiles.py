@@ -99,11 +99,35 @@ class ProfileTests(unittest.TestCase):
             for t, v in pts:
                 self.assertAlmostEqual(curve.value(t), v, 9)
         cubic = profiles.table_profile(pts, 3)
-        for border in (1.0, 2.5):
-            for order in (0, 1, 2):
+        for border in (1.0, 2.5, 3.0):
+            for order in (0, 1):
                 self.assertAlmostEqual(cubic.value(border - 1e-9, order), cubic.value(border, order), 5)
-        self.assertAlmostEqual(cubic.value(0.0, 2), 0.0, 9)  # natural end
-        self.assertAlmostEqual(cubic.value(3.0, 2), 0.0, 6)
+        self.assertAlmostEqual(cubic.value(0.0, 1), 0.0, 9)  # flat ends, smooth hold
+        self.assertAlmostEqual(cubic.value(3.0, 1), 0.0, 6)
+
+    def test_table_cubic_no_overshoot(self):
+        # the user's second table: a natural spline went to -800 between (6, 0) and (10, 0)
+        pts = [(0.0, 0.0), (1.0, 200.0), (2.0, 300.0), (3.0, 2000.0), (6.0, 0.0), (10.0, 0.0)]
+        curve = profiles.table_profile(pts, 3)
+        for (t0, v0), (t1, v1) in zip(pts, pts[1:]):
+            for k in range(1, 50):
+                v = curve.value(t0 + (t1 - t0) * k / 50)
+                self.assertGreaterEqual(v, min(v0, v1) - 1e-9)
+                self.assertLessEqual(v, max(v0, v1) + 1e-9)
+
+    def test_table_holds_end_values(self):
+        # the user's case: velocity table ending at 0, simulated longer than the table
+        pts = [(0.0, 0.0), (1.0, 200.0), (2.0, 300.0), (3.0, 500.0), (6.0, 0.0)]
+        for degree in (1, 3):
+            curve = profiles.table_profile(pts, degree)
+            for t in (6.0, 7.5, 12.0):
+                self.assertAlmostEqual(curve.value(t), 0.0, places=9)
+            pos = profiles.build("table", {}, "velocity", angular=True, table=pts, degree=degree)
+            self.assertAlmostEqual(pos.value(12.0), pos.value(6.0), places=9)
+        late = profiles.table_profile([(2.0, 5.0), (4.0, 1.0)], 1)
+        self.assertAlmostEqual(late.value(0.0), 5.0)
+        self.assertAlmostEqual(late.value(1.0), 5.0)
+        self.assertAlmostEqual(late.value(9.0), 1.0)
 
     def test_table_errors(self):
         with self.assertRaises(ValueError):

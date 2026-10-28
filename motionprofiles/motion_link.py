@@ -111,6 +111,24 @@ def find_simulation(asm):
     return None
 
 
+def all_motions(asm):
+    """Alle Motions in den Simulationen der Baugruppe."""
+    return [o for o in asm.OutListRecursive
+            if hasattr(o, "MotionType") and hasattr(o, "Formula") and hasattr(o, "Joint")]
+
+
+def find_motion(asm, joint, prefix, exclude=None):
+    """Motion, die bereits diese Gelenk-Instanz antreibt (sonst None). Eine Motion ohne
+    Instanzpfad (aeltere Datei, Vanilla) gilt fuer das Gelenk selbst."""
+    for motion in all_motions(asm):
+        if motion is exclude:
+            continue
+        mj, mp = motion_joint(motion)
+        if mj == joint and (mp == prefix or not mp):
+            return motion
+    return None
+
+
 def get_or_create_simulation(asm):
     import CommandCreateSimulation as CCS
     import UtilsAssembly

@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 """Task panel: choose joint, driven quantity and profile; live preview of position, velocity and
 acceleration; OK writes the Motion (new or existing)."""
+import time
+
 import FreeCAD as App
 import FreeCADGui as Gui
 from PySide import QtCore, QtWidgets
@@ -9,6 +11,41 @@ from . import motion_link, profiles
 
 QUANTITY_LABELS = {"position": "Weg", "velocity": "Geschwindigkeit", "acceleration": "Beschleunigung"}
 PREVIEW_POINTS = 400
+
+
+def _make_canvas(figure):
+    """Matplotlib-Zeichenflaeche, die ein von FreeCAD schon geloeschtes Widget vertraegt: schliesst
+    die Aufgabenansicht, loescht Qt das Widget, waehrend Matplotlib noch ein verzoegertes
+    Neuzeichnen bzw. den Anzeige-Handler offen hat ("Internal C++ object already deleted")."""
+    from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+
+    class Canvas(FigureCanvasQTAgg):
+        def showEvent(self, event):
+            try:
+                super().showEvent(event)
+            except RuntimeError:
+                pass
+
+        def _draw_idle(self):
+            try:
+                super()._draw_idle()
+            except RuntimeError:
+                pass
+
+    return Canvas(figure)
+
+
+def _save_placements(assembly):
+    import UtilsAssembly
+
+    return UtilsAssembly.saveAssemblyPartsPlacements(assembly)
+
+
+def _restore_placements(assembly, placements):
+    import UtilsAssembly
+
+    if placements:
+        UtilsAssembly.restoreAssemblyPartsPlacements(assembly, placements)
 
 
 def _spin(value, decimals=4, minimum=-1e9, maximum=1e9, suffix=""):
@@ -26,14 +63,22 @@ class MotionProfileTaskPanel:
 
     def __init__(self, assembly, motion=None, joint=None, prefix=""):
         self.assembly = assembly
-        self.motion = motion
+        # explizit uebergebene Motion: nur diese bearbeiten. Sonst die Motion des gewaehlten
+        # Gelenks (eine schon vorhandene - nie eine zweite am selben Gelenk anlegen).
+        self.explicit = motion is not None
         self.instances = motion_link.joint_instances(assembly)
+        if motion is None and joint is not None:
+            motion = motion_link.find_motion(assembly, joint, prefix)
+        self.motion = motion
         self.spec = (motion_link.read_spec(motion) if motion else None) or motion_link.default_spec()
         if motion is not None:
             joint, prefix = motion_link.motion_joint(motion)
+        self.initial_placements = _save_placements(assembly)
+        self.timer = None
         # erst bei OK anlegen - Abbrechen hinterlaesst keine leere Simulation
         self.sim = motion_link.find_simulation(assembly)
         self.param_boxes = {}
+        self.closed = False
         self.form = QtWidgets.QWidget()
         self.form.setWindowTitle("Bewegungsprofil")
         self._build()
@@ -66,6 +111,9 @@ class MotionProfileTaskPanel:
         top.addRow("Profil", self.profile_combo)
         top.addRow("", self.formula_label)
         layout.addLayout(top)
+        self.target_label = QtWidgets.QLabel()
+        self.target_label.setWordWrap(True)
+        layout.addWidget(self.target_label)
 
         self.params_box = QtWidgets.QGroupBox("Parameter")
         self.params_layout = QtWidgets.QFormLayout(self.params_box)
@@ -113,15 +161,17 @@ class MotionProfileTaskPanel:
                                 "wird zur Stellung beim Start addiert (initialValue).")
         hint.setWordWrap(True)
         layout.addWidget(hint)
+        self.play_button = QtWidgets.QPushButton("Übernehmen, simulieren und abspielen")
+        self.play_button.clicked.connect(self.play)
+        layout.addWidget(self.play_button)
 
         self.canvas = None
         try:
-            from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
             from matplotlib.figure import Figure
 
             self.figure = Figure(figsize=(4, 5), tight_layout=True)
             self.axes = [self.figure.add_subplot(3, 1, i + 1) for i in range(3)]
-            self.canvas = FigureCanvasQTAgg(self.figure)
+            self.canvas = _make_canvas(self.figure)
             self.canvas.setMinimumHeight(360)
             layout.addWidget(self.canvas)
         except ImportError:
@@ -150,13 +200,47 @@ class MotionProfileTaskPanel:
 
     def _joint_changed(self, *_):
         data = self.joint_combo.currentData()
+        if data and not self.explicit and hasattr(self, "spec"):
+            target = motion_link.find_motion(self.assembly, data[0], data[1])
+            if target is not self.motion:
+                self.motion = target
+                stored = motion_link.read_spec(target) if target else None
+                if stored and hasattr(self, "t_step"):
+                    self.spec = stored
+                    self._load_spec()
         self.type_combo.blockSignals(True)
         self.type_combo.clear()
         if data:
             for kind in motion_link.motion_types_for(data[0]):
                 self.type_combo.addItem({"Angular": "Drehung", "Linear": "Verschiebung"}[kind], kind)
+        if self.motion is not None and self.motion.MotionType in [self.type_combo.itemData(i) for i in range(self.type_combo.count())]:
+            self._set_combo(self.type_combo, self.motion.MotionType)
         self.type_combo.blockSignals(False)
+        self._update_target_label()
         self.update_preview()
+
+    def _conflicting_motion(self):
+        """Bei explizit bearbeiteter Motion: andere Motion am jetzt gewaehlten Gelenk."""
+        data = self.joint_combo.currentData()
+        if not data or not self.explicit:
+            return None
+        return motion_link.find_motion(self.assembly, data[0], data[1], exclude=self.motion)
+
+    def _update_target_label(self):
+        if not hasattr(self, "target_label"):
+            return
+        other = self._conflicting_motion()
+        if other is not None:
+            text = (f"Achtung: dieses Gelenk treibt schon die Motion „{other.Label}“ an - zwei "
+                    "Antriebe am selben Gelenk widersprechen sich. Diese bearbeiten oder löschen.")
+        elif self.motion is None:
+            text = "Legt eine neue Motion an."
+        elif motion_link.has_profile(self.motion):
+            text = f"Bearbeitet die vorhandene Motion „{self.motion.Label}“."
+        else:
+            text = (f"Bearbeitet die vorhandene Motion „{self.motion.Label}“ - ihre Formel "
+                    f"„{self.motion.Formula}“ wird durch das Profil ersetzt.")
+        self.target_label.setText(text)
 
     def _load_spec(self):
         self._set_combo(self.quantity_combo, self.spec["quantity"])
@@ -225,7 +309,7 @@ class MotionProfileTaskPanel:
         return self.type_combo.currentData() == "Angular"
 
     def update_preview(self, *_):
-        if not hasattr(self, "t_step"):
+        if not hasattr(self, "t_step") or self.closed:
             return
         self.v0_box.setEnabled(self.quantity_combo.currentData() == "acceleration")
         base = "°" if self.angular() else "mm"
@@ -255,13 +339,18 @@ class MotionProfileTaskPanel:
         self.canvas.draw_idle()
         return pos
 
-    # ------------------------------------------------------------------ task dialog
-    def accept(self):
+    # ------------------------------------------------------------------ speichern, abspielen
+    def save(self):
+        """Motion (neu oder vorhanden) und Simulationszeiten schreiben. False bei Fehler."""
         if self.update_preview() is None and self.message.text():
             return False
         data = self.joint_combo.currentData()
         if not data:
             self.message.setText("Kein antreibbares Gelenk (Drehung, Schieben, Zylinder) gefunden.")
+            return False
+        other = self._conflicting_motion()
+        if other is not None:
+            self.message.setText(f"Das Gelenk treibt schon die Motion „{other.Label}“ an.")
             return False
         joint, prefix = data
         spec = self.current_spec()
@@ -281,9 +370,59 @@ class MotionProfileTaskPanel:
             motion_link.write_spec(self.motion, spec)
         doc.commitTransaction()
         doc.recompute()
+        self._update_target_label()
+        return True
+
+    def play(self):
+        """Speichern, Simulation rechnen und einmal im 3D-Fenster abspielen (erneut: Stopp)."""
+        if self.timer is not None and self.timer.isActive():
+            self._stop_playback()
+            return
+        if not self.save():
+            return
+        rc = self.assembly.generateSimulation(self.sim)
+        self.frames = self.assembly.numberOfFrames() if rc == 0 else 0
+        if self.frames < 2:
+            self.message.setText(f"Simulation fehlgeschlagen (rc={rc}) - siehe Ausgabefenster.")
+            return
+        self.message.setText("")
+        fps = max(1, int(getattr(self.sim, "jFramesPerSecond", 30) or 30))
+        self.play_start = time.time()
+        self.play_fps = fps
+        self.timer = QtCore.QTimer()
+        self.timer.setInterval(int(1000 / fps))
+        self.timer.timeout.connect(self._next_frame)
+        self.play_button.setText("Stopp")
+        self.timer.start()
+
+    def _next_frame(self):
+        frame = 1 + int((time.time() - self.play_start) * self.play_fps)
+        if frame >= self.frames:
+            self.assembly.updateForFrame(self.frames - 1)
+            self._stop_playback()
+            return
+        self.assembly.updateForFrame(frame)
+
+    def _stop_playback(self):
+        if self.timer is not None:
+            self.timer.stop()
+        if hasattr(self, "play_button"):
+            self.play_button.setText("Übernehmen, simulieren und abspielen")
+
+    def _finish(self):
+        """Abspielen beenden, Teile wie beim Oeffnen (wie der Simulationsdialog), schliessen."""
+        self._stop_playback()
+        _restore_placements(self.assembly, self.initial_placements)
+        self.closed = True
         Gui.Control.closeDialog()
+
+    # ------------------------------------------------------------------ task dialog
+    def accept(self):
+        if not self.save():
+            return False
+        self._finish()
         return True
 
     def reject(self):
-        Gui.Control.closeDialog()
+        self._finish()
         return True
