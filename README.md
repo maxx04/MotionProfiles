@@ -7,9 +7,19 @@ Choose what you drive — **position, velocity or acceleration** — and a profi
 The addon turns it into a normal Assembly `Motion` formula, so files stay readable and
 simulatable in FreeCAD without the addon.
 
-Status: early development. Done: profile math and formula generation (phase 1), verified in
-real simulations against FreeCAD weekly 2026.10.21 (phase 2). Next: task panel with live
-preview of position / velocity / acceleration.
+Status: early development.
+- Done: profile math and formula generation, verified in real simulations against FreeCAD weekly
+  2026.10.21 and the assembly sandbox; task panel with live preview of position / velocity /
+  acceleration (command "Bewegungsprofil" next to "Simulation" in the Assembly workbench).
+- Next: Addon Manager metadata (package.xml), translations, result plots after a simulation.
+
+## Usage
+
+1. Activate an assembly, select a revolute, slider or cylindrical joint (or an existing Motion).
+2. Assembly toolbar/menu: **Bewegungsprofil**.
+3. Choose the driven quantity (Weg/Geschwindigkeit/Beschleunigung) and a profile, enter the
+   values (degrees or mm, seconds) or a table; the preview shows all three curves.
+4. OK creates or updates the Motion of the assembly's simulation. Run the simulation as usual.
 
 ## How it works
 
@@ -27,7 +37,8 @@ Notes:
 ## Tests
 
     python3 -m unittest discover -s tests          # math and formula text, no FreeCAD needed
-    # in FreeCAD: tests/fc_simulation_check.py (main()) - runs real simulations
+    # in FreeCAD (main()): tests/fc_simulation_check.py - real simulations
+    #                      tests/fc_taskpanel_check.py  - task panel (GUI, e.g. under Xvfb)
 
 ## License
 
