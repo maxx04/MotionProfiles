@@ -10,6 +10,7 @@ Prints "RESULT: PASS" or "RESULT: FAIL".
 import math
 import os
 import sys
+import time
 
 import FreeCAD as App
 
@@ -90,7 +91,7 @@ def main():
 
     # 5) open/close through the real task view: no "C++ object already deleted" from matplotlib
     import FreeCADGui as Gui
-    from PySide import QtCore, QtWidgets
+    from PySide import QtCore, QtGui, QtWidgets
 
     errors = []
     previous_hook = sys.excepthook
@@ -110,6 +111,16 @@ def main():
     finally:
         sys.excepthook = previous_hook
     ok &= check("Aufgabenansicht öffnen/schließen", not errors, "; ".join(errors[:2]) or "keine Fehler")
+
+    # mouse wheel over the plot goes on to the task view (scrolling), not swallowed by matplotlib
+    panel = MotionProfileTaskPanel(asm, motion=motion)
+    centre = QtCore.QPointF(10, 10)
+    wheel = QtGui.QWheelEvent(centre, centre, QtCore.QPoint(), QtCore.QPoint(0, -120),
+                              QtCore.Qt.NoButton, QtCore.Qt.NoModifier, QtCore.Qt.NoScrollPhase, False)
+    wheel.accept()
+    panel.canvas.wheelEvent(wheel)
+    ok &= check("Mausrad über Diagramm", not wheel.isAccepted(), "weitergereicht" if not wheel.isAccepted() else "verschluckt")
+    panel.reject()
 
     # 6) joint chosen without motion: the existing motion is edited, no second one
     panel = MotionProfileTaskPanel(asm, joint=joint)
@@ -156,6 +167,87 @@ def main():
     panel.reject()
     back = mover.Placement.isSame(start, 1e-9)
     ok &= check("Lage nach Schließen zurück", back, str(mover.Placement))
+
+    # 9) list of existing motions: shown, selecting loads it, delete removes it
+    panel = MotionProfileTaskPanel(asm)
+    texts = [panel.motion_list.item(i).text() for i in range(panel.motion_list.count())]
+    ok &= check("Liste", len(texts) == 1 and "Profil constant" in texts[0], "; ".join(texts))
+    panel._set_combo(panel.profile_combo, "ramp")
+    panel.motion_list.setCurrentRow(-1)
+    panel.motion_list.setCurrentRow(0)
+    ok &= check("Auswahl lädt", panel.motion is plain and panel.explicit
+                and panel.profile_combo.currentData() == "constant"
+                and abs(panel.param_boxes["A"].value() - 45.0) < 1e-9,
+                f"Profil {panel.profile_combo.currentData()}")
+    panel.delete_motion()
+    left = [o for o in doc.Objects if hasattr(o, "MotionType")]
+    ok &= check("Löschen", not left and panel.motion is None and panel.motion_list.count() == 0
+                and not sim.Group and "neue" in panel.target_label.text(),
+                f"{len(left)} Motion(s), Liste {panel.motion_list.count()}, „{panel.target_label.text()}“")
+    doc.undo()
+    ok &= check("Löschen rückgängig", len([o for o in doc.Objects if hasattr(o, "MotionType")]) == 1)
+    panel.reject()
+    App.closeDocument(doc.Name)
+
+    # 10) limits: sandbox stops at the limit and says so, vanilla says limits are ignored
+    respects = motion_link.simulation_respects_limits()
+    doc, asm, joint, mover = build_assembly("Revolute")
+    joint.EnableAngleMin = True
+    joint.AngleMin = -90.0
+    joint.EnableAngleMax = True
+    joint.AngleMax = 20.0
+    doc.recompute()
+    panel = MotionProfileTaskPanel(asm, joint=joint)
+    ok &= check("Hinweistext", ("hält die Simulation dort an" in panel.hint.text()) == respects,
+                panel.hint.text()[:60])
+    ok &= check("Knopf farbig", "background-color" in panel.play_button.styleSheet())
+    panel._set_combo(panel.quantity_combo, "velocity")
+    panel._set_combo(panel.profile_combo, "constant")
+    panel.param_boxes["A"].setValue(45.0)
+    panel.t_end.setValue(1.0)
+    panel.t_step.setValue(0.05)
+    panel.play()
+    for _ in range(300):
+        QtWidgets.QApplication.processEvents()
+        QtCore.QThread.msleep(10)
+        if panel.timer is None or not panel.timer.isActive():
+            break
+    stopped = "Gelenkgrenze" in panel.message.text()
+    ok &= check("Anschlag gemeldet", stopped == respects and panel.progress.value() == panel.frames - 1,
+                f"{panel.frames} Bilder, „{panel.message.text()}“, Balken {panel.progress.format()}")
+    # replay: shows the computed frames again without recomputing
+    frames_before = panel.frames
+    calls = []
+    original = asm.generateSimulation
+    panel.replay()
+    seen_frames = []
+    for _ in range(300):
+        QtWidgets.QApplication.processEvents()
+        QtCore.QThread.msleep(10)
+        seen_frames.append(panel.progress.value())
+        if panel.timer is None or not panel.timer.isActive():
+            break
+    ok &= check("Abspielen ohne Neuberechnen", panel.frames == frames_before and max(seen_frames) == frames_before - 1
+                and panel.replay_button.text().endswith("Abspielen"),
+                f"{panel.frames} Bilder, bis Bild {max(seen_frames)}")
+    panel.reject()
+    App.closeDocument(doc.Name)
+
+    # 11) long simulation: progress per frame mirrored from FreeCAD's sequencer (sandbox)
+    doc, asm, joint, mover = build_assembly("Revolute")
+    panel = MotionProfileTaskPanel(asm, joint=joint)
+    panel._set_combo(panel.quantity_combo, "velocity")
+    panel._set_combo(panel.profile_combo, "constant")
+    panel.param_boxes["A"].setValue(10.0)
+    panel.t_end.setValue(20.0)
+    panel.t_step.setValue(0.002)
+    t0 = time.time()
+    panel.play()
+    seconds = time.time() - t0
+    panel._stop_playback()
+    ok &= check("Fortschritt beim Rechnen", (getattr(panel, "seen_progress", 0) > 0) == respects,
+                f"{panel.frames} Bilder in {seconds:.1f} s, höchster gespiegelter Wert {getattr(panel, 'seen_progress', 0)}")
+    panel.reject()
     App.closeDocument(doc.Name)
 
     print("RESULT: PASS" if ok else "RESULT: FAIL")

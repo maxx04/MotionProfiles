@@ -101,6 +101,14 @@ def motion_joint(motion):
     return value, ""
 
 
+def simulation_respects_limits():
+    """True in the assembly sandbox (2026-10-29+): the simulation stops at a joint limit. Vanilla
+    FreeCAD ignores limits in simulations. The sandbox is recognised by its joint-instance API."""
+    import UtilsAssembly
+
+    return hasattr(UtilsAssembly, "getJointInstancesOfType")
+
+
 def find_simulation(asm):
     """Erste Simulation der Baugruppe oder None (legt nichts an)."""
     import CommandCreateSimulation as CCS

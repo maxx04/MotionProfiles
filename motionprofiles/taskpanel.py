@@ -32,7 +32,24 @@ def _make_canvas(figure):
             except RuntimeError:
                 pass
 
+        def wheelEvent(self, event):
+            # Das Diagramm nutzt das Mausrad nicht: an die Aufgabenansicht weiterreichen, damit
+            # sie auch mit der Maus ueber dem Diagramm scrollt (Matplotlib nimmt es sonst an).
+            event.ignore()
+
     return Canvas(figure)
+
+
+PLAY_TEXT = "▶  Übernehmen, berechnen und abspielen"
+REPLAY_TEXT = "▶  Abspielen"
+REPLAY_STYLE = ("QPushButton { background-color: #1565c0; color: white; font-weight: bold; padding: 6px; }"
+                "QPushButton:hover { background-color: #1976d2; }"
+                "QPushButton:disabled { background-color: #8a9bb0; }")
+PLAY_STYLE = ("QPushButton { background-color: #2e7d32; color: white; font-weight: bold; padding: 6px; }"
+              "QPushButton:hover { background-color: #388e3c; }"
+              "QPushButton:disabled { background-color: #7a9a7c; }")
+STOP_STYLE = ("QPushButton { background-color: #c62828; color: white; font-weight: bold; padding: 6px; }"
+              "QPushButton:hover { background-color: #d32f2f; }")
 
 
 def _save_placements(assembly):
@@ -86,11 +103,93 @@ class MotionProfileTaskPanel:
         if motion is not None:
             self._set_combo(self.type_combo, motion.MotionType)
         self._load_spec()
+        self._fill_motion_list()
         self.update_preview()
+
+    # ------------------------------------------------------------------ Liste der Bewegungen
+    def _fill_motion_list(self):
+        """Alle Motions der Baugruppe; die bearbeitete ist markiert."""
+        self.motion_list.blockSignals(True)
+        self.motion_list.clear()
+        for motion in motion_link.all_motions(self.assembly):
+            joint, prefix = motion_link.motion_joint(motion)
+            what = (f"Profil {motion.ProfileType}" if motion_link.has_profile(motion)
+                    else f"Formel {motion.Formula}")
+            name = motion_link.joint_label(joint, prefix) if joint else "kein Gelenk"
+            item = QtWidgets.QListWidgetItem(f"{motion.Label} – {name} – {what}")
+            item.setData(QtCore.Qt.UserRole, motion.Name)
+            self.motion_list.addItem(item)
+            if motion is self.motion:
+                self.motion_list.setCurrentItem(item)
+        self.motion_list.blockSignals(False)
+        self.delete_button.setEnabled(self.motion is not None)
+
+    def _motion_selected(self, item, *_):
+        motion = self.assembly.Document.getObject(item.data(QtCore.Qt.UserRole)) if item else None
+        if motion is not None:  # auch die gerade bearbeitete: gespeicherten Stand neu laden
+            self.edit_motion(motion)
+
+    def edit_motion(self, motion):
+        """Diese Motion bearbeiten (Gelenk, Art und Profil aus ihr laden)."""
+        self.motion = motion
+        self.explicit = True
+        stored = motion_link.read_spec(motion)
+        if stored:
+            self.spec = stored
+        joint, prefix = motion_link.motion_joint(motion)
+        self._select_joint(joint, prefix)
+        self._set_combo(self.type_combo, motion.MotionType)
+        self._load_spec()
+        self._fill_motion_list()
+        self._update_target_label()
+        self.update_preview()
+
+    def new_motion(self):
+        """Eine neue Bewegung anlegen - am gewaehlten Gelenk wird trotzdem eine dort schon
+        vorhandene bearbeitet (nie zwei Antriebe an einem Gelenk)."""
+        self.explicit = False
+        data = self.joint_combo.currentData()
+        self.motion = motion_link.find_motion(self.assembly, data[0], data[1]) if data else None
+        self._fill_motion_list()
+        self._update_target_label()
+
+    def delete_motion(self):
+        """Die gewaehlte Bewegung loeschen (rueckgaengig mit Bearbeiten > Rueckgaengig)."""
+        item = self.motion_list.currentItem()
+        motion = self.assembly.Document.getObject(item.data(QtCore.Qt.UserRole)) if item else self.motion
+        if motion is None:
+            return
+        self._stop_playback()
+        doc = self.assembly.Document
+        doc.openTransaction("Bewegung löschen")
+        for sim in motion.InList:
+            if hasattr(sim, "Group") and motion in sim.Group:
+                sim.Group = [o for o in sim.Group if o is not motion]
+        doc.removeObject(motion.Name)
+        doc.commitTransaction()
+        doc.recompute()
+        if motion is self.motion:
+            self.motion = None
+        self.new_motion()
 
     # ------------------------------------------------------------------ UI
     def _build(self):
         layout = QtWidgets.QVBoxLayout(self.form)
+        motions_box = QtWidgets.QGroupBox("Vorhandene Bewegungen")
+        motions_layout = QtWidgets.QVBoxLayout(motions_box)
+        self.motion_list = QtWidgets.QListWidget()
+        self.motion_list.setMaximumHeight(110)
+        self.motion_list.currentItemChanged.connect(self._motion_selected)
+        motions_layout.addWidget(self.motion_list)
+        motion_buttons = QtWidgets.QHBoxLayout()
+        new_button = QtWidgets.QPushButton("Neu")
+        new_button.clicked.connect(self.new_motion)
+        self.delete_button = QtWidgets.QPushButton("Löschen")
+        self.delete_button.clicked.connect(self.delete_motion)
+        motion_buttons.addWidget(new_button)
+        motion_buttons.addWidget(self.delete_button)
+        motions_layout.addLayout(motion_buttons)
+        layout.addWidget(motions_box)
         top = QtWidgets.QFormLayout()
         self.joint_combo = QtWidgets.QComboBox()
         for joint, prefix in self.instances:
@@ -157,13 +256,32 @@ class MotionProfileTaskPanel:
         self.message.setStyleSheet("color: #c0392b")
         self.message.setWordWrap(True)
         layout.addWidget(self.message)
-        hint = QtWidgets.QLabel("Hinweis: Die Simulation beachtet Gelenkgrenzen nicht. Das Profil "
-                                "wird zur Stellung beim Start addiert (initialValue).")
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
-        self.play_button = QtWidgets.QPushButton("Übernehmen, simulieren und abspielen")
+        if motion_link.simulation_respects_limits():
+            limits = ("Erreicht ein Gelenk seine Grenze, hält die Simulation dort an (Meldung hier "
+                      "und im Ausgabefenster).")
+        else:
+            limits = "Die Simulation beachtet Gelenkgrenzen nicht."
+        self.hint = QtWidgets.QLabel(f"Hinweis: {limits} Das Profil wird zur Stellung beim Start "
+                                     "addiert (initialValue).")
+        self.hint.setWordWrap(True)
+        layout.addWidget(self.hint)
+        play_row = QtWidgets.QHBoxLayout()
+        self.play_button = QtWidgets.QPushButton(PLAY_TEXT)
+        self.play_button.setStyleSheet(PLAY_STYLE)
+        self.play_button.setToolTip("Profil übernehmen, Simulation neu berechnen und abspielen")
         self.play_button.clicked.connect(self.play)
-        layout.addWidget(self.play_button)
+        self.replay_button = QtWidgets.QPushButton(REPLAY_TEXT)
+        self.replay_button.setStyleSheet(REPLAY_STYLE)
+        self.replay_button.setToolTip("Die zuletzt berechnete Simulation noch einmal abspielen")
+        self.replay_button.setEnabled(False)
+        self.replay_button.clicked.connect(self.replay)
+        play_row.addWidget(self.play_button, 2)
+        play_row.addWidget(self.replay_button, 1)
+        layout.addLayout(play_row)
+        self.progress = QtWidgets.QProgressBar()
+        self.progress.setTextVisible(True)
+        self.progress.setVisible(False)
+        layout.addWidget(self.progress)
 
         self.canvas = None
         try:
@@ -370,44 +488,111 @@ class MotionProfileTaskPanel:
             motion_link.write_spec(self.motion, spec)
         doc.commitTransaction()
         doc.recompute()
+        self.explicit = True
+        self._fill_motion_list()
         self._update_target_label()
         return True
 
     def play(self):
-        """Speichern, Simulation rechnen und einmal im 3D-Fenster abspielen (erneut: Stopp)."""
+        """Speichern, Simulation rechnen und einmal im 3D-Fenster abspielen."""
+        self._stop_playback()
+        if not self.save():
+            return
+        # Die Sandbox meldet je gerechnetem Bild Fortschritt ueber FreeCADs Statusleisten-Balken
+        # (Esc bricht ab) und haelt die Oberflaeche dabei lebendig; ein Zeitgeber spiegelt ihn in
+        # den eigenen Balken. Vanilla blockiert bis zum Ende: dort bleibt der Balken ein Lauflicht.
+        self.progress.setRange(0, 0)
+        self.progress.setFormat("Simulation wird berechnet …")
+        self.progress.setVisible(True)
+        self.play_button.setEnabled(False)
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        QtWidgets.QApplication.processEvents()
+        mirror = QtCore.QTimer()
+        mirror.setInterval(100)
+        mirror.timeout.connect(self._mirror_progress)
+        mirror.start()
+        try:
+            rc = self.assembly.generateSimulation(self.sim)
+            self.frames = self.assembly.numberOfFrames() if rc == 0 else 0
+        finally:
+            mirror.stop()
+            QtWidgets.QApplication.restoreOverrideCursor()
+            self.play_button.setEnabled(True)
+        if self.frames < 2:
+            self.progress.setVisible(False)
+            self.message.setText(f"Simulation fehlgeschlagen (rc={rc}) - siehe Ausgabefenster.")
+            return
+        start, step = self.sim.aTimeStart.Value, self.sim.cTimeStepOutput.Value
+        expected = int(round((self.sim.bTimeEnd.Value - start) / step)) + 2  # Bild 0 = Ausgangslage
+        self.frame_times = (start, step)
+        if self.frames < expected:
+            self.message.setText(f"Simulation endet bei t = {start + (self.frames - 2) * step:.3g} s: "
+                                 "Gelenkgrenze erreicht oder abgebrochen (Details im Ausgabefenster).")
+        else:
+            self.message.setText("")
+        self._start_playback()
+
+    def replay(self):
+        """Die zuletzt berechneten Bilder noch einmal abspielen (waehrenddessen: Stopp). Hat
+        inzwischen ein Neuberechnen der Baugruppe die Bilder verworfen, wird neu gerechnet."""
         if self.timer is not None and self.timer.isActive():
             self._stop_playback()
             return
-        if not self.save():
+        if not getattr(self, "frames", 0) or self.assembly.numberOfFrames() != self.frames:
+            self.play()
             return
-        rc = self.assembly.generateSimulation(self.sim)
-        self.frames = self.assembly.numberOfFrames() if rc == 0 else 0
-        if self.frames < 2:
-            self.message.setText(f"Simulation fehlgeschlagen (rc={rc}) - siehe Ausgabefenster.")
-            return
-        self.message.setText("")
+        self._start_playback()
+
+    def _start_playback(self):
+        self.progress.setVisible(True)
+        self.progress.setRange(0, self.frames - 1)
+        self._show_frame(1)
         fps = max(1, int(getattr(self.sim, "jFramesPerSecond", 30) or 30))
         self.play_start = time.time()
         self.play_fps = fps
         self.timer = QtCore.QTimer()
         self.timer.setInterval(int(1000 / fps))
         self.timer.timeout.connect(self._next_frame)
-        self.play_button.setText("Stopp")
+        self.replay_button.setEnabled(True)
+        self.replay_button.setText("■  Stopp")
+        self.replay_button.setStyleSheet(STOP_STYLE)
         self.timer.start()
+
+    def _mirror_progress(self):
+        """Fortschritt des FreeCAD-Sequencers (Statusleiste) in den eigenen Balken uebernehmen."""
+        try:
+            bars = Gui.getMainWindow().statusBar().findChildren(QtWidgets.QProgressBar)
+        except Exception:
+            return
+        for bar in bars:
+            if bar.isVisible() and bar.maximum() > 0:
+                self.progress.setRange(0, bar.maximum())
+                self.progress.setValue(bar.value())
+                self.progress.setFormat("Simulation wird berechnet … %p %   (Esc bricht ab)")
+                self.seen_progress = max(getattr(self, "seen_progress", 0), bar.value())
+                return
+
+    def _show_frame(self, frame):
+        start, step = self.frame_times
+        self.progress.setValue(frame)
+        self.progress.setFormat(f"t = {start + (frame - 1) * step:.2f} s   (Bild {frame} / {self.frames - 1})")
 
     def _next_frame(self):
         frame = 1 + int((time.time() - self.play_start) * self.play_fps)
         if frame >= self.frames:
             self.assembly.updateForFrame(self.frames - 1)
+            self._show_frame(self.frames - 1)
             self._stop_playback()
             return
         self.assembly.updateForFrame(frame)
+        self._show_frame(frame)
 
     def _stop_playback(self):
         if self.timer is not None:
             self.timer.stop()
-        if hasattr(self, "play_button"):
-            self.play_button.setText("Übernehmen, simulieren und abspielen")
+        if hasattr(self, "replay_button"):
+            self.replay_button.setText(REPLAY_TEXT)
+            self.replay_button.setStyleSheet(REPLAY_STYLE)
 
     def _finish(self):
         """Abspielen beenden, Teile wie beim Oeffnen (wie der Simulationsdialog), schliessen."""

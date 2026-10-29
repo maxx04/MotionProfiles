@@ -18,6 +18,8 @@ Status: early development.
 ## Usage
 
 1. Activate an assembly, select a revolute, slider or cylindrical joint (or an existing Motion).
+   The panel lists all Motions of the assembly: pick one to edit it, "Löschen" deletes it (undo
+   with Edit > Undo), "Neu" starts a new one.
 2. Assembly toolbar/menu: **Bewegungsprofil**.
 3. Choose the driven quantity (Weg/Geschwindigkeit/Beschleunigung) and a profile, enter the
    values (degrees or mm, seconds) or a table; the preview shows all three curves.
